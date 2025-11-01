@@ -1,1 +1,0 @@
-hackokstate-production.up.railway.app
