@@ -15,15 +15,27 @@ LOAD_CLASSIFIER = True
 CLASSIFIER_PATH = "/Users/patrickha/Documents/OSUHACK/2nd/HACKOKSTATE/sign_clf.pkl"
 
 # Text recognition settings
-STABILITY_FRAMES = 15        # Frames sign must be stable before adding to text
-WORD_TIMEOUT = 2.0          # Seconds without signs = add space
+STABILITY_FRAMES = 20       # Frames sign must be stable before adding to text
+WORD_TIMEOUT = 1.5          # Reduced timeout for faster sentence building
+LETTER_COOLDOWN = 0.8       # Faster cooldown between letters for fluid typing
 CLEAR_GESTURE = None        # Set to a sign label to clear text (e.g., "CLEAR")
 
 # TTS Settings
 SPEAK_LETTERS = True         # Speak individual letters as they're added
 SPEAK_WORDS = True           # Speak complete words when space is added
-SPEAK_SENTENCES = False      # Speak entire sentences (can be disruptive)
-TTS_COOLDOWN = 1.0          # Minimum seconds between TTS outputs
+SPEAK_SENTENCES = True       # Enable sentence speaking
+TTS_COOLDOWN = 0.8          # Faster TTS for better flow
+
+# Gesture detection settings
+BOTH_HANDS_SPACE_GESTURE = True  # Add space when both hands are open
+BOTH_HANDS_READ_GESTURE = True   # Read sentence when both hands are closed
+HAND_OPEN_THRESHOLD = 0.15      # Distance threshold for open hand detection
+GESTURE_STABILITY_FRAMES = 8    # Faster gesture recognition
+
+# Sentence building settings
+AUTO_SPACING = True          # Automatically add spaces between words
+MAX_WORD_LENGTH = 8          # Auto-space after this many characters
+COMMON_WORDS = {'I', 'A', 'AN', 'THE', 'IS', 'AM', 'ARE', 'IN', 'ON', 'AT', 'TO', 'OF', 'AND', 'BUT', 'OR'}
 
 # -------- Text-to-Speech Manager --------
 class TTSManager:
@@ -40,19 +52,16 @@ class TTSManager:
         """Initialize text-to-speech engine"""
         try:
             self.engine = pyttsx3.init()
-            self.engine.setProperty('rate', 160)  # Slightly faster for letters
+            self.engine.setProperty('rate', 160)
             self.engine.setProperty('volume', 0.9)
             
-            # Get available voices
             voices = self.engine.getProperty('voices')
             if voices:
-                # Prefer female voice if available
                 for voice in voices:
                     if 'female' in voice.name.lower() or 'samantha' in voice.name.lower():
                         self.engine.setProperty('voice', voice.id)
                         break
                 else:
-                    # Use first available voice
                     self.engine.setProperty('voice', voices[0].id)
             
             print("✅ Text-to-speech engine initialized")
@@ -63,20 +72,17 @@ class TTSManager:
             return False
     
     def can_speak(self):
-        """Check if we can speak (cooldown)"""
         return time.time() - self.last_tts_time >= self.tts_cooldown
     
     def speak(self, text, priority="normal"):
-        """Speak text with cooldown management"""
         if not self.engine or not text or not self.can_speak():
             return False
         
         try:
-            # Adjust speech rate based on content length
-            if len(text) == 1:  # Single letter
-                self.engine.setProperty('rate', 140)  # Slower for clarity
+            if len(text) == 1:
+                self.engine.setProperty('rate', 140)
             else:
-                self.engine.setProperty('rate', 160)  # Normal speed for words
+                self.engine.setProperty('rate', 160)
             
             self.engine.say(text)
             self.engine.runAndWait()
@@ -88,24 +94,104 @@ class TTSManager:
             return False
     
     def speak_letter(self, letter):
-        """Speak a single letter"""
         if self.speak_letters and letter and len(letter) == 1:
             return self.speak(letter, "letter")
         return False
     
     def speak_word(self, word):
-        """Speak a complete word"""
         if self.speak_words and word and len(word) > 1:
             return self.speak(word, "word")
         return False
     
     def speak_sentence(self, sentence):
-        """Speak a complete sentence"""
         if self.speak_sentences and sentence:
             return self.speak(sentence, "sentence")
         return False
 
-# -------- Text Manager --------
+# -------- Gesture Detector --------
+class GestureDetector:
+    def __init__(self):
+        self.open_hands_buffer = deque(maxlen=GESTURE_STABILITY_FRAMES)
+        self.closed_hands_buffer = deque(maxlen=GESTURE_STABILITY_FRAMES)
+        self.last_gesture_time = 0
+        self.gesture_cooldown = 1.5  # Faster gesture cooldown
+        
+    def is_hand_open(self, landmarks):
+        if landmarks is None or len(landmarks) < 21:
+            return False
+            
+        wrist = landmarks[0]
+        middle_mcp = landmarks[9]
+        
+        thumb_tip = landmarks[4]
+        index_tip = landmarks[8]
+        middle_tip = landmarks[12]
+        ring_tip = landmarks[16]
+        pinky_tip = landmarks[20]
+        
+        tips = [thumb_tip, index_tip, middle_tip, ring_tip, pinky_tip]
+        distances = [np.linalg.norm(tip - middle_mcp) for tip in tips]
+        
+        extended_fingers = sum(1 for dist in distances if dist > HAND_OPEN_THRESHOLD)
+        return extended_fingers >= 3
+    
+    def is_hand_closed(self, landmarks):
+        if landmarks is None or len(landmarks) < 21:
+            return False
+            
+        wrist = landmarks[0]
+        middle_mcp = landmarks[9]
+        
+        thumb_tip = landmarks[4]
+        index_tip = landmarks[8]
+        middle_tip = landmarks[12]
+        ring_tip = landmarks[16]
+        pinky_tip = landmarks[20]
+        
+        tips = [thumb_tip, index_tip, middle_tip, ring_tip, pinky_tip]
+        distances = [np.linalg.norm(tip - middle_mcp) for tip in tips]
+        
+        extended_fingers = sum(1 for dist in distances if dist > HAND_OPEN_THRESHOLD)
+        return extended_fingers <= 1
+    
+    def detect_gestures(self, hand_landmarks_list):
+        current_time = time.time()
+        
+        if not hand_landmarks_list:
+            self.open_hands_buffer.append(False)
+            self.closed_hands_buffer.append(False)
+            return None, None
+        
+        hand_states = []
+        for landmarks in hand_landmarks_list:
+            is_open = self.is_hand_open(landmarks)
+            is_closed = self.is_hand_closed(landmarks)
+            hand_states.append((is_open, is_closed))
+        
+        both_hands_open = len(hand_states) == 2 and all(open for open, closed in hand_states)
+        both_hands_closed = len(hand_states) == 2 and all(closed for open, closed in hand_states)
+        
+        self.open_hands_buffer.append(both_hands_open)
+        self.closed_hands_buffer.append(both_hands_closed)
+        
+        stable_both_open = (len(self.open_hands_buffer) == GESTURE_STABILITY_FRAMES and 
+                           all(self.open_hands_buffer))
+        stable_both_closed = (len(self.closed_hands_buffer) == GESTURE_STABILITY_FRAMES and 
+                             all(self.closed_hands_buffer))
+        
+        can_trigger = current_time - self.last_gesture_time > self.gesture_cooldown
+        
+        if can_trigger:
+            if stable_both_open and BOTH_HANDS_SPACE_GESTURE:
+                self.last_gesture_time = current_time
+                return "space", "Both hands open - Add space"
+            elif stable_both_closed and BOTH_HANDS_READ_GESTURE:
+                self.last_gesture_time = current_time
+                return "read", "Both hands closed - Read sentence"
+        
+        return None, None
+
+# -------- Enhanced Text Manager for Sentence Building --------
 class TextBuilder:
     def __init__(self, tts_manager):
         self.text = ""
@@ -113,64 +199,97 @@ class TextBuilder:
         self.stable_count = 0
         self.last_sign_time = 0
         self.last_added_sign = None
+        self.last_letter_time = 0
         self.recent_history = deque(maxlen=20)
         self.tts = tts_manager
-        self.current_word = ""  # Track current word for word-level TTS
+        self.current_word = ""
+        self.word_start_time = 0
         
+    def should_add_space(self):
+        """Smart space detection for sentence building"""
+        if not AUTO_SPACING or not self.current_word:
+            return False
+            
+        # Auto-space for common short words
+        if self.current_word.upper() in COMMON_WORDS:
+            return True
+            
+        # Auto-space when word gets too long
+        if len(self.current_word) >= MAX_WORD_LENGTH:
+            return True
+            
+        return False
+    
     def add_prediction(self, label):
-        """Process a new sign prediction"""
+        """Process a new sign prediction with sentence building"""
         current_time = time.time()
         self.recent_history.append(label)
         
-        # Check if sign changed
         if label != self.current_sign:
             self.current_sign = label
             self.stable_count = 1
-            print(f"[TextBuilder] New sign: {label}")
         else:
             self.stable_count += 1
         
-        # Add space if timeout occurred
-        if self.last_sign_time > 0 and current_time - self.last_sign_time > WORD_TIMEOUT:
-            if self.text and not self.text.endswith(" "):
-                self.add_space_auto()
+        # Auto-space based on word completion
+        if self.should_add_space():
+            self.add_space_auto()
         
-        # If sign is stable enough and different from last added
-        if self.stable_count >= STABILITY_FRAMES and label != self.last_added_sign:
-            # Check for clear gesture
+        # Word timeout (shorter for faster sentence building)
+        if (self.last_sign_time > 0 and 
+            current_time - self.last_sign_time > WORD_TIMEOUT and
+            self.current_word):
+            self.add_space_auto()
+        
+        # Letter cooldown check
+        can_add_letter = (current_time - self.last_letter_time >= LETTER_COOLDOWN)
+        
+        # Add letter if stable and cooldown passed
+        if self.stable_count >= STABILITY_FRAMES and can_add_letter:
             if CLEAR_GESTURE and label == CLEAR_GESTURE:
                 self.clear()
             else:
                 self.add_character(label)
             
-            self.stable_count = 0  # Reset counter after adding
+            self.stable_count = 0
         
         self.last_sign_time = current_time
         return self.text
     
     def add_character(self, char):
-        """Add a character to the text and handle TTS"""
+        """Add a character with sentence building logic"""
+        # Start timing new words
+        if not self.current_word:
+            self.word_start_time = time.time()
+            
         self.text += char
         self.last_added_sign = char
         self.current_word += char
+        self.last_letter_time = time.time()
         
-        print(f"[TextBuilder] Added '{char}' to text. Current text: '{self.text}'")
+        print(f"[TextBuilder] Added '{char}' | Word: '{self.current_word}' | Text: '{self.text}'")
         
-        # Speak the individual letter
+        # Check if we should auto-space after adding this character
+        if self.should_add_space():
+            self.add_space_auto()
+        
         self.tts.speak_letter(char)
     
     def add_space_auto(self):
-        """Automatically add space (from timeout)"""
+        """Automatically add space with word completion"""
         if self.text and not self.text.endswith(" "):
             self.text += " "
             self.last_added_sign = None
             
-            # Speak the completed word
+            # Speak and log the completed word
             if self.current_word:
+                word_duration = time.time() - self.word_start_time
+                print(f"[TextBuilder] Completed word: '{self.current_word}' ({word_duration:.1f}s)")
                 self.tts.speak_word(self.current_word)
-                self.current_word = ""  # Reset current word
+                self.current_word = ""
+                self.word_start_time = 0
             
-            print("[TextBuilder] Added space (timeout)")
+            print("[TextBuilder] Added space (auto)")
     
     def add_space_manual(self):
         """Manually add space"""
@@ -178,34 +297,45 @@ class TextBuilder:
             self.text += " "
             self.last_added_sign = None
             
-            # Speak the completed word
             if self.current_word:
+                print(f"[TextBuilder] Completed word: '{self.current_word}'")
                 self.tts.speak_word(self.current_word)
                 self.current_word = ""
+                self.word_start_time = 0
             
             print("[TextBuilder] Added space (manual)")
-            
-            # Also speak "space" for clarity
             self.tts.speak("space")
     
+    def read_sentence(self):
+        """Read the entire current sentence"""
+        if self.text and self.text.strip():
+            sentence = self.text.strip()
+            print(f"[TextBuilder] Reading sentence: '{sentence}'")
+            self.tts.speak_sentence(sentence)
+            return True
+        else:
+            print("[TextBuilder] No text to read")
+            self.tts.speak("No text to read")
+            return False
+    
     def backspace(self):
-        """Remove last character"""
+        """Remove last character with word tracking"""
         if self.text:
             removed_char = self.text[-1]
             self.text = self.text[:-1]
             
-            # Update current word
             if self.current_word:
                 if removed_char == ' ':
-                    # If we removed a space, the previous word is now current
                     words = self.text.split()
                     self.current_word = words[-1] if words else ""
+                    if self.current_word:
+                        self.word_start_time = time.time()  # Reset timer for the restored word
                 else:
                     self.current_word = self.current_word[:-1]
+                    if not self.current_word:
+                        self.word_start_time = 0
             
             print(f"[TextBuilder] Backspace. New text: '{self.text}'")
-            
-            # Speak "backspace" for feedback
             self.tts.speak("backspace")
     
     def clear(self):
@@ -213,30 +343,40 @@ class TextBuilder:
         self.text = ""
         self.last_added_sign = None
         self.current_word = ""
+        self.last_letter_time = 0
+        self.word_start_time = 0
         print("[TextBuilder] Cleared all text")
-        
-        # Speak "cleared" for feedback
         self.tts.speak("cleared")
     
     def no_hands_detected(self):
-        """Call when no hands are detected"""
         self.current_sign = None
         self.stable_count = 0
     
     def get_current_word(self):
-        """Get the current word being built"""
         return self.current_word
     
     def get_full_text(self):
-        """Get the complete text"""
         return self.text
+    
+    def get_word_count(self):
+        """Get number of words in the text"""
+        return len(self.text.split()) if self.text.strip() else 0
+    
+    def get_sentence_info(self):
+        """Get sentence statistics"""
+        words = self.text.split()
+        return {
+            'word_count': len(words),
+            'char_count': len(self.text),
+            'current_word_length': len(self.current_word)
+        }
 
 # -------- Camera --------
 cap = cv2.VideoCapture(CAMERA_INDEX)
 if not cap.isOpened():
     raise RuntimeError(f"❌ Could not open camera index {CAMERA_INDEX}")
 
-w  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))  or 1280
+w  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1280
 h  = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 720
 fps = cap.get(cv2.CAP_PROP_FPS) or 30
 print(f"🎥 Camera opened: {w}x{h} @ {fps:.1f} FPS")
@@ -261,42 +401,39 @@ if LOAD_CLASSIFIER:
         clf, LABELS = load(CLASSIFIER_PATH)
         print(f"✅ Loaded classifier: {CLASSIFIER_PATH}")
         print(f"   Labels: {LABELS}")
-        print(f"   Classifier type: {type(clf)}")
-        
-        # Test the classifier with dummy data
-        test_feat = np.random.rand(1, 42)
-        test_pred = clf.predict(test_feat)
-        print(f"   Test prediction works: {test_pred}")
-        
     except Exception as e:
         print(f"❌ Classifier loading failed: {e}")
-        print(f"   Current directory: {os.getcwd()}")
-        print(f"   Looking for: {CLASSIFIER_PATH}")
-        print("   Will draw landmarks only.")
         clf, LABELS = None, None
 
-# -------- Initialize TTS and Text Builder --------
+# -------- Initialize Systems --------
 tts_manager = TTSManager()
+gesture_detector = GestureDetector()
 text_builder = TextBuilder(tts_manager)
 
 print("\n" + "="*60)
-print("CONTROLS:")
+print("🎯 SENTENCE BUILDING MODE")
+print("="*60)
+print("GESTURE CONTROLS:")
+print("  ✋✋ Both hands OPEN    - Add space")
+print("  ✊✊ Both hands CLOSED  - Read sentence")
+print("")
+print("AUTO-FEATURES:")
+print("  ✓ Spaces added for common words (I, A, THE, etc.)")
+print("  ✓ Auto-space after long words")
+print("  ✓ Word timeout: 1.5 seconds")
+print("  ✓ Fast letter cooldown: 0.8 seconds")
+print("")
+print("KEYBOARD CONTROLS:")
 print("  ESC      - Quit")
-print("  SPACE    - Add space to text (speaks current word)")
+print("  SPACE    - Add space + speak word")
 print("  BACKSPACE- Delete last character")
 print("  C        - Clear all text")
-print("  S        - Speak current text")
+print("  S        - Speak current sentence")
 print("  W        - Speak current word")
-print("  T        - Toggle letter TTS (current: " + ("ON" if SPEAK_LETTERS else "OFF") + ")")
+print("  T        - Toggle letter TTS")
 print("="*60)
-print("TTS FEATURES:")
-print("  ✓ Letters spoken as they're added")
-print("  ✓ Words spoken when space is added") 
-print("  ✓ Audio feedback for actions")
-print("="*60)
-print("▶️ Running...\n")
+print("▶️ Start signing to build sentences...\n")
 
-# Toggle states
 speak_letters_enabled = SPEAK_LETTERS
 
 try:
@@ -331,33 +468,29 @@ try:
 
         hands_count = 0
         current_prediction = None
+        hand_landmarks_list = []
         
         if res.multi_hand_landmarks:
             for idx, handlms in enumerate(res.multi_hand_landmarks):
-                # 21 normalized landmarks
-                pts = np.array([[lm.x, lm.y] for lm in handlms.landmark], dtype=np.float32)
+                pts = np.array([[lm.x, lm.y, lm.z] for lm in handlms.landmark], dtype=np.float32)
+                hand_landmarks_list.append(pts)
 
-                # Pixel coords
                 pts_px = pts.copy()
                 pts_px[:, 0] *= view.shape[1]
                 pts_px[:, 1] *= view.shape[0]
                 pts_px = pts_px.astype(int)
                 cx, cy = int(pts_px[:, 0].mean()), int(pts_px[:, 1].mean())
 
-                # Optional ROI filter
                 if DRAW_ROI and ROI is not None and inside((cx, cy), ROI) < 0:
                     continue
 
                 hands_count += 1
-
-                # Draw landmarks
                 mp_draw.draw_landmarks(view, handlms, mp.solutions.hands.HAND_CONNECTIONS)
                 cv2.circle(view, (cx, cy), 6, (255, 0, 0), -1)
 
-                # Classification
                 if clf is not None and LABELS is not None:
-                    # Normalize landmarks
-                    pts_norm = pts.copy()
+                    pts_xy = pts[:, :2].copy()
+                    pts_norm = pts_xy.copy()
                     anchor   = pts_norm[0].copy()
                     pts_norm -= anchor
                     scale    = np.linalg.norm(pts_norm, axis=1).max() + 1e-6
@@ -368,84 +501,123 @@ try:
                         pred  = clf.predict(feat)[0]
                         label = LABELS[pred] if isinstance(pred, (int, np.integer)) else str(pred)
                         current_prediction = label
-                        
-                        # Display current sign
                         cv2.putText(view, f"{label}", (cx + 10, cy - 10),
                                     cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 3)
                     except Exception as e:
                         print(f"Classification error: {e}")
-                        label = "?"
         
-        # Update text builder
-        if current_prediction:
+        # ---- Gesture Detection ----
+        gesture, gesture_description = gesture_detector.detect_gestures(hand_landmarks_list)
+        
+        if gesture:
+            print(f"👐 GESTURE: {gesture_description}")
+            if gesture == "space":
+                text_builder.add_space_auto()
+                tts_manager.speak("space")
+            elif gesture == "read":
+                text_builder.read_sentence()
+        
+        # Process letter predictions
+        if current_prediction and not gesture and hands_count != 2:
             text_builder.add_prediction(current_prediction)
         else:
             text_builder.no_hands_detected()
 
-        # ---- Draw UI ----
-        # Text output box (top of screen)
-        box_height = 120
+        # ---- Enhanced UI Display ----
+        box_height = 160
         overlay = view.copy()
         cv2.rectangle(overlay, (0, 0), (view.shape[1], box_height), (0, 0, 0), -1)
         cv2.addWeighted(overlay, 0.7, view, 0.3, 0, view)
         
-        # Display accumulated text
-        text_to_display = text_builder.text if text_builder.text else "[Start signing...]"
-        # Wrap text if too long
-        max_chars = 80
+        # Display sentence text
+        text_to_display = text_builder.text if text_builder.text else "[Start signing to build sentences...]"
+        max_chars = 70
         if len(text_to_display) > max_chars:
             text_to_display = "..." + text_to_display[-max_chars:]
         
         cv2.putText(view, text_to_display, (10, 35),
                     cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
         
-        # Status info
-        status = f"Sign: {current_prediction or 'None'} | Stable: {text_builder.stable_count}/{STABILITY_FRAMES}"
-        cv2.putText(view, status, (10, 70),
+        # Current word and status
+        current_word = text_builder.get_current_word()
+        sentence_info = text_builder.get_sentence_info()
+        
+        status_line = f"Word: '{current_word}' | Letters: {sentence_info['current_word_length']}/{MAX_WORD_LENGTH}"
+        cv2.putText(view, status_line, (10, 70),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 1)
+        
+        # Sentence stats
+        stats_line = f"Words: {sentence_info['word_count']} | Chars: {sentence_info['char_count']} | Stable: {text_builder.stable_count}/{STABILITY_FRAMES}"
+        cv2.putText(view, stats_line, (10, 95),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
         
-        # TTS status
-        tts_status = f"TTS: {'ON' if speak_letters_enabled else 'OFF'}"
-        cv2.putText(view, tts_status, (10, 95),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
-
-        # Hand count
-        cv2.putText(view, f"Hands: {hands_count}", (view.shape[1] - 150, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+        # Cooldown status
+        current_time = time.time()
+        time_since_last_letter = current_time - text_builder.last_letter_time
+        cooldown_remaining = max(0, LETTER_COOLDOWN - time_since_last_letter)
         
-        # Current word
-        current_word = text_builder.get_current_word()
-        if current_word:
-            cv2.putText(view, f"Word: {current_word}", (view.shape[1] - 200, 80),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 1)
+        if cooldown_remaining > 0:
+            cooldown_color = (0, 0, 255)
+            cooldown_text = f"Next letter in: {cooldown_remaining:.1f}s"
+        else:
+            cooldown_color = (0, 255, 0)
+            cooldown_text = "Ready for next letter"
+        
+        cv2.putText(view, cooldown_text, (10, 120),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, cooldown_color, 1)
+        
+        # Auto-spacing status
+        auto_space_status = "AUTO-SPACING: ON" if AUTO_SPACING else "AUTO-SPACING: OFF"
+        cv2.putText(view, auto_space_status, (10, 145),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
+        
+        # Hand state
+        hand_state = ""
+        state_color = (0, 255, 255)
+        
+        if gesture:
+            if gesture == "space":
+                hand_state = "SPACE ADDED"
+                state_color = (0, 255, 0)
+            elif gesture == "read":
+                hand_state = "READING SENTENCE"
+                state_color = (255, 255, 0)
+        elif hands_count == 2:
+            hand_state = "SHOW GESTURE"
+            state_color = (255, 165, 0)
+        elif hands_count == 1:
+            hand_state = "TYPING LETTERS"
+            state_color = (0, 255, 255)
+        else:
+            hand_state = "NO HANDS"
+            state_color = (200, 200, 200)
+        
+        cv2.putText(view, f"Hands: {hands_count} - {hand_state}", (view.shape[1] - 450, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, state_color, 1)
 
-        # Show
         cv2.imshow(WINDOW_NAME, view)
         
         # Keyboard controls
         key = cv2.waitKey(1) & 0xFF
-        if key == 27:  # ESC
+        if key == 27:
             break
-        elif key == ord(' '):  # SPACE
+        elif key == ord(' '):
             text_builder.add_space_manual()
-        elif key == 8:  # BACKSPACE
+        elif key == 8:
             text_builder.backspace()
-        elif key == ord('c') or key == ord('C'):  # C
+        elif key == ord('c'):
             text_builder.clear()
-        elif key == ord('s') or key == ord('S'):  # S - Speak full text
-            full_text = text_builder.get_full_text()
-            if full_text:
-                tts_manager.speak(full_text, "sentence")
-        elif key == ord('w') or key == ord('W'):  # W - Speak current word
+        elif key == ord('s'):
+            text_builder.read_sentence()
+        elif key == ord('w'):
             current_word = text_builder.get_current_word()
             if current_word:
                 tts_manager.speak_word(current_word)
-        elif key == ord('t') or key == ord('T'):  # T - Toggle letter TTS
+        elif key == ord('t'):
             speak_letters_enabled = not speak_letters_enabled
             tts_manager.speak_letters = speak_letters_enabled
             status = "ON" if speak_letters_enabled else "OFF"
             print(f"🔊 Letter TTS: {status}")
-            tts_manager.speak(f"Letter speech {status}")
 
 except KeyboardInterrupt:
     print("\n🛑 Interrupted by user.")
@@ -453,16 +625,21 @@ finally:
     cap.release()
     cv2.destroyAllWindows()
     
-    # Print final text
+    # Final output
     print("\n" + "="*60)
-    print("FINAL TEXT:")
+    print("FINAL SENTENCE:")
     final_text = text_builder.get_full_text()
-    print(final_text if final_text else "[No text captured]")
-    
-    # Speak final text
-    if final_text and tts_manager.engine:
-        print("🗣️ Speaking final text...")
+    if final_text:
+        print(f"'{final_text}'")
+        word_count = text_builder.get_word_count()
+        print(f"📊 Statistics: {word_count} words, {len(final_text)} characters")
+        print("🗣️ Speaking final sentence...")
         tts_manager.speak_sentence(final_text)
+    else:
+        print("[No sentence created]")
     
     print("="*60)
     print("✅ Clean exit.")
+
+def inside(pt, poly):
+    return cv2.pointPolygonTest(poly, (float(pt[0]), float(pt[1])), False) >= 0
