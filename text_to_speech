@@ -131,7 +131,7 @@ class GestureDetector:
         
         tips = [thumb_tip, index_tip, middle_tip, ring_tip, pinky_tip]
         distances = [np.linalg.norm(tip - middle_mcp) for tip in tips]
-        
+        ç
         extended_fingers = sum(1 for dist in distances if dist > HAND_OPEN_THRESHOLD)
         return extended_fingers >= 3
     
